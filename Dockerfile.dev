@@ -1,0 +1,14 @@
+ARG NODE_VERSION=22.20.0
+
+################################################################################
+# Use node image for base image for all stages.
+FROM node:latest
+WORKDIR /app
+
+COPY . .
+
+RUN npm install
+
+EXPOSE 3000
+
+CMD ["npm", "run", "dev"]
