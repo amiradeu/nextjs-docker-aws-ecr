@@ -44,9 +44,9 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha,prefix={{branch}}-
+            type=ref,event=branch,sanitize=true,lowercase=true
+            type=ref,event=pr,sanitize=true,lowercase=true
+            type=sha,prefix={{branch}},separator=-,sanitize=true,lowercase=true
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
