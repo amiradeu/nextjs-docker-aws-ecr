@@ -45,10 +45,17 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}
           tags: |
-            type=ref,event=branch,sanitize=true,lowercase=true
-            type=ref,event=pr,sanitize=true,lowercase=true
-            type=sha,prefix={{branch}},separator=-,sanitize=true,lowercase=true
-            type=raw,value=latest,enable={{is_default_branch}}
+            # 1. PR builds (e.g. pr-42-5a2ab27)
+            type=raw,value=pr-${{ github.event.pull_request.number }}-${{ github.sha }},enable=${{ github.event_name == 'pull_request' }}
+
+            # 2. Branch builds (e.g. main-5a2ab27)
+            type=raw,value=${{ github.ref_name }}-${{ github.sha }},enable=${{ github.event_name != 'pull_request' }}
+
+            # 3. Latest tag for default branch only (e.g. main-latest)
+            type=raw,value=${{ github.ref_name }}-latest,enable=${{ github.ref_name == github.event.repository.default_branch }}
+
+            # 4. simple SHA tag (for debugging or deterministic pull)
+            type=sha
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
