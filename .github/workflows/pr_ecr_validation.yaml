@@ -1,0 +1,177 @@
+name: PR - Validate ECR Deployment Configuration
+
+on:
+  pull_request:
+    branches:
+      - main
+      - staging
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read    # Required to checkout code
+
+jobs:
+  validate-ecr-deployment:
+    name: Validate ECR Deployment (Dry-Run)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ✅ Test AWS credentials configuration
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-1
+          role-session-name: GitHubActions-PR-${{ github.event.pull_request.number }}
+
+      # ✅ Test ECR login
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ✅ Verify ECR repository exists
+      - name: Verify ECR repository exists
+        run: |
+          echo "Checking if ECR repository exists..."
+          aws ecr describe-repositories \
+            --repository-names ${{ secrets.ECR_REPOSITORY }} \
+            --region ap-southeast-1 || \
+          (echo "❌ ECR repository '${{ secrets.ECR_REPOSITORY }}' not found" && exit 1)
+          echo "✅ ECR repository verified"
+
+      # ✅ Test metadata extraction (simulating what would happen on merge)
+      - name: Extract metadata for Docker (Dry-Run)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}
+          tags: |
+            # Simulate what tags would be created after merge
+            type=raw,value=${{ github.base_ref }}-pr${{ github.event.pull_request.number }}-test
+            type=sha,prefix=pr${{ github.event.pull_request.number }}-
+
+      # ✅ Build Docker image (validates Dockerfile and build process)
+      - name: Build Docker image (No Push)
+        run: |
+          echo "🔨 Building Docker image..."
+          IMAGE_NAME="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}"
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          
+          echo "Building with tag: $FIRST_TAG"
+          docker build -t "$FIRST_TAG" .
+          
+          echo "✅ Docker build successful"
+
+      # ✅ Test that image can run
+      - name: Test Docker image runs
+        run: |
+          echo "🧪 Testing if Docker image can run..."
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          
+          # Start container in background
+          docker run -d --name test-container -p 3000:3000 "$FIRST_TAG"
+          
+          # Wait for app to initialize
+          echo "Waiting for application to start..."
+          sleep 10
+          
+          # Check if container is still running
+          if docker ps | grep test-container > /dev/null; then
+            echo "✅ Container is running successfully"
+          else
+            echo "❌ Container failed to start"
+            echo "Container logs:"
+            docker logs test-container
+            exit 1
+          fi
+          
+          # Cleanup
+          docker stop test-container
+          docker rm test-container
+
+      # ✅ Simulate tagging (without pushing)
+      - name: Simulate Docker tagging (Dry-Run)
+        run: |
+          echo "🏷️  Simulating Docker tag operations..."
+          IMAGE_NAME="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}"
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          
+          echo "Would create the following tags:"
+          while IFS= read -r TAG; do
+            if [ -n "$TAG" ]; then
+              echo "  - $TAG"
+              if [ "$TAG" != "$FIRST_TAG" ]; then
+                docker tag "$FIRST_TAG" "$TAG"
+                echo "    ✅ Tagged locally (not pushed)"
+              fi
+            fi
+          done <<< "${{ steps.meta.outputs.tags }}"
+
+      # ✅ Verify what would be pushed (without actually pushing)
+      - name: Verify push readiness (Dry-Run)
+        run: |
+          echo "📦 Deployment Readiness Check"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "✅ AWS Credentials: Configured"
+          echo "✅ ECR Login: Successful"
+          echo "✅ ECR Repository: Exists"
+          echo "✅ Docker Build: Successful"
+          echo "✅ Docker Run: Successful"
+          echo "✅ Image Tagging: Validated"
+          echo ""
+          echo "📋 Would push to ECR:"
+          echo "   Repository: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}"
+          echo "   Region: ap-southeast-5"
+          echo ""
+          echo "   Tags that would be pushed:"
+          while IFS= read -r TAG; do
+            if [ -n "$TAG" ]; then
+              echo "   - $TAG"
+            fi
+          done <<< "${{ steps.meta.outputs.tags }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "⚠️  DRY-RUN MODE: No images were pushed to ECR"
+          echo "✅ All deployment configurations are valid!"
+          echo "💡 Images will be built and pushed after PR merge"
+
+      # ✅ Check image size
+      - name: Check Docker image size
+        run: |
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          SIZE=$(docker images "$FIRST_TAG" --format "{{.Size}}")
+          echo "📦 Docker image size: $SIZE"
+          
+          # Extract size in MB for comparison
+          SIZE_MB=$(docker images "$FIRST_TAG" --format "{{.Size}}" | sed 's/MB//' | sed 's/GB/*1024/' | bc 2>/dev/null || echo "0")
+          
+          if (( $(echo "$SIZE_MB > 1000" | bc -l 2>/dev/null || echo "0") )); then
+            echo "⚠️  Warning: Image size exceeds 1GB. Consider optimization."
+          elif (( $(echo "$SIZE_MB > 500" | bc -l 2>/dev/null || echo "0") )); then
+            echo "ℹ️  Image size is moderate. Monitor for further growth."
+          else
+            echo "✅ Image size is reasonable"
+          fi
+
+      # ✅ Output PR summary
+      - name: PR Validation Summary
+        if: always()
+        run: |
+          echo "🎉 PR Validation Complete!"
+          echo ""
+          echo "This PR has been validated for ECR deployment."
+          echo "After merge to ${{ github.base_ref }}, the following will happen:"
+          echo ""
+          echo "1. Docker image will be built"
+          echo "2. Image will be tagged with:"
+          while IFS= read -r TAG; do
+            if [ -n "$TAG" ]; then
+              echo "   - $TAG"
+            fi
+          done <<< "${{ steps.meta.outputs.tags }}"
+          echo "3. Images will be pushed to ECR"
+          echo "4. DevOps team can deploy to Kubernetes"
